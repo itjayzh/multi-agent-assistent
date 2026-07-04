@@ -3,7 +3,6 @@ import sqlite3
 import uuid
 import re
 import requests
-from pathlib import Path
 from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -11,12 +10,13 @@ from vectorizer.app.core.settings import get_settings
 from vectorizer.app.core.logger import logger
 from .chunkenizer import recursive_character_splitting
 from vectorizer.app.embeddings.embedding_generator import generate_embedding
+from faq_extension.data_source import DataSourceManager
+from faq_extension.document_parser import parse_document
 import asyncio
 import aiohttp
 from tqdm.asyncio import tqdm_asyncio
 from more_itertools import chunked
 import time
-from docx import Document
 
 settings = get_settings()
 
@@ -124,50 +124,6 @@ class VectorDB:
             logger.warning(f"无法确定 embedding 维度: {str(e)}")
             logger.info("默认使用 1536 维")
             return 1536
-
-    def load_local_faq_documents(self):
-        """优先从本地 FAQ 目录读取知识库文件。"""
-        faq_dir = Path("faq_documents")
-        if not faq_dir.exists():
-            logger.info("未找到本地 FAQ 目录 faq_documents，将使用远程 FAQ 数据源。")
-            return []
-
-        docs = []
-        supported_patterns = ("*.md", "*.txt", "*.docx")
-        file_paths = []
-        for pattern in supported_patterns:
-            file_paths.extend(sorted(faq_dir.glob(pattern)))
-
-        for file_path in file_paths:
-            try:
-                if file_path.suffix.lower() in {".md", ".txt"}:
-                    content = file_path.read_text(encoding="utf-8").strip()
-                elif file_path.suffix.lower() == ".docx":
-                    document = Document(file_path)
-                    content = "\n".join(
-                        paragraph.text.strip()
-                        for paragraph in document.paragraphs
-                        if paragraph.text.strip()
-                    ).strip()
-                else:
-                    continue
-
-                if not content:
-                    logger.warning(f"本地 FAQ 文件为空，已跳过: {file_path}")
-                    continue
-
-                docs.append(
-                    {
-                        "page_content": content,
-                        "source": str(file_path),
-                    }
-                )
-                logger.info(f"已加载本地 FAQ 文件: {file_path}")
-            except Exception as e:
-                logger.error(f"读取本地 FAQ 文件失败 {file_path}: {str(e)}")
-
-        logger.info(f"共加载 {len(docs)} 个本地 FAQ 文件")
-        return docs
 
     def format_content(self, data, collection_name):
         # 为不同集合实现对应的内容格式化逻辑
@@ -492,7 +448,27 @@ class VectorDB:
         logger.info(f"✅ {self.collection_name} 索引完成，共写入 {total_indexed} 条文档")
 
     async def index_faq_docs(self):
-        local_docs = self.load_local_faq_documents()
+        local_docs = []
+        data_source_manager = DataSourceManager()
+        local_sources = data_source_manager.get_local_sources()
+
+        for source_config in local_sources:
+            files = data_source_manager.scan_source_files(source_config)
+            for file_info in files:
+                file_path = file_info["path"]
+                content = parse_document(file_path)
+                if not content or not content.strip():
+                    logger.warning(f"本地 FAQ 文件内容为空，已跳过: {file_path}")
+                    continue
+
+                local_docs.append(
+                    {
+                        "page_content": content.strip(),
+                        "source": file_path,
+                    }
+                )
+                logger.info(f"已加载本地 FAQ 文件: {file_path}")
+
         if local_docs:
             logger.info("📄 优先使用本地 FAQ 知识库文件进行写入")
             initial_docs = [doc["page_content"] for doc in local_docs if doc.get("page_content")]
