@@ -7,7 +7,7 @@ from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
 
 
 def main():
-    # 确保数据库已下载并完成初始化
+    # 确保 PostgreSQL 数据库连接可用
     download_and_prepare_db()
 
     # 生成并保存图结构可视化文件

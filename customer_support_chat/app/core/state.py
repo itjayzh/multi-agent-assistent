@@ -13,6 +13,7 @@ def update_dialog_stack(left: list[str], right: Optional[str]) -> list[str]:
 class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     user_info: str
+    guardrail_blocked: bool
     dialog_state: Annotated[
         list[
             Literal[

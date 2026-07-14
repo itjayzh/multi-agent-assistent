@@ -26,9 +26,10 @@ settings = get_settings()
 
 # 越狱护栏代理
 jailbreak_guardrail_agent = ChatOpenAI(
-    model="gpt-4o-mini", # 使用响应更快、成本更低的模型执行护栏检查
+    model=settings.GUARDRAIL_MODEL, # 默认复用当前可用对话模型，避免网关模型不兼容
     openai_api_key=settings.OPENAI_API_KEY,
     openai_api_base=settings.OPENAI_BASE_URL if settings.OPENAI_BASE_URL else None,
+    extra_body={"enable_thinking": False}, # 关闭思考模式以兼容结构化输出调用
     temperature=0, # 使用确定性输出，便于安全判断保持稳定
 ).with_structured_output(JailbreakOutput)
 
@@ -43,9 +44,10 @@ jailbreak_guardrail_agent_instructions = (
 
 # 相关性护栏代理
 relevance_guardrail_agent = ChatOpenAI(
-    model="gpt-4o-mini", # 使用响应更快、成本更低的模型执行护栏检查
+    model=settings.GUARDRAIL_MODEL, # 默认复用当前可用对话模型，避免网关模型不兼容
     openai_api_key=settings.OPENAI_API_KEY,
     openai_api_base=settings.OPENAI_BASE_URL if settings.OPENAI_BASE_URL else None,
+    extra_body={"enable_thinking": False}, # 关闭思考模式以兼容结构化输出调用
     temperature=0, # 使用确定性输出，便于相关性判断保持稳定
 ).with_structured_output(RelevanceOutput)
 
@@ -57,9 +59,7 @@ relevance_guardrail_agent_instructions = (
     "租车（预订、修改、取消）、"
     "酒店（预订、修改、取消、状态查询）、"
     "本地游或行程推荐、"
-    "电商商品与订单查询（基于 WooCommerce）、"
-    "联系表单提交、"
-    "以及博客文章搜索。"
+    "以及常见问题政策查询。"
     "像“你好”“好的”“谢谢”这类普通对话消息，也视为相关。"
     "只有当消息与上述业务范围完全无关时，才应标记为不相关，例如“怎么造宇宙飞船？”或“火星上的天气怎么样？”。"
 )

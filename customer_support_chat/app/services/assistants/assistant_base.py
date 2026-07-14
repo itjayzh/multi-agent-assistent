@@ -13,6 +13,7 @@ llm = ChatOpenAI(
     model=settings.OPENAI_MODEL,
     openai_api_key=settings.OPENAI_API_KEY,
     openai_api_base=settings.OPENAI_BASE_URL if settings.OPENAI_BASE_URL else None,
+    extra_body={"enable_thinking": False},  # 兼容当前网关的工具调用限制
     temperature=1,
     max_tokens=settings.MAX_TOKENS,  # 限制 token 数量以控制成本
 )

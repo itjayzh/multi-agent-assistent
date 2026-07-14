@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Union
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
 from customer_support_chat.app.graph import multi_agentic_graph
 from customer_support_chat.app.core.logger import logger
+from customer_support_chat.app.core.humanloop_manager import APPROVAL_DISABLED_MESSAGE, approvals_enabled
 
 # 尝试导入 web_app 模块
 try:
@@ -19,7 +20,12 @@ try:
     if project_root not in sys.path:
         sys.path.append(project_root)
     
-    from web_app.app.core.user_data_manager import set_pending_action, get_pending_action, get_user_decision, clear_pending_action, clear_user_decision, add_operation_log
+    from web_app.app.core.user_data_manager import (
+        add_operation_log,
+        claim_pending_action,
+        resolve_pending_action,
+        set_pending_action,
+    )
     WEB_APP_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Web 应用模块不可用，HITL 功能将受到限制。错误信息：{e}")
@@ -139,7 +145,22 @@ async def process_user_message(session_data: Dict[str, Any], user_message: str) 
                         "tool_calls": tool_calls_details,
                         "timestamp": asyncio.get_event_loop().time()
                     }
-                    set_pending_action(session_data["session_id"], pending_action)
+                    action_id = set_pending_action(session_data["session_id"], pending_action)
+                    try:
+                        from web_app.app.services.feishu_approval_service import create_approval_instance
+                        instance_code = await create_approval_instance(action_id, pending_action)
+                        if instance_code:
+                            add_operation_log(session_data["session_id"], {
+                                "type": "system_message",
+                                "title": "飞书审批已创建",
+                                "content": f"审批实例：{instance_code}",
+                            })
+                    except Exception as error:
+                        add_operation_log(session_data["session_id"], {
+                            "type": "error",
+                            "title": "飞书审批创建失败",
+                            "content": str(error),
+                        })
                     
                     # 将中断信息写入操作日志
                     add_operation_log(session_data["session_id"], {
@@ -345,6 +366,9 @@ async def process_user_decision(session_data: Dict[str, Any], decision: str) -> 
     Returns:
         str: 处理决策后返回的 AI 响应消息。
     """
+    if not approvals_enabled():
+        return APPROVAL_DISABLED_MESSAGE
+
     if not WEB_APP_AVAILABLE:
         return "当前环境不支持 HITL 功能。"
     
@@ -358,8 +382,8 @@ async def process_user_decision(session_data: Dict[str, Any], decision: str) -> 
     result_message = ""
     
     try:
-        # 获取待处理操作
-        pending_action = get_pending_action(session_data["session_id"])
+        # 原子领取待处理操作，避免 Web 和飞书重复批准。
+        pending_action = claim_pending_action(session_data["session_id"])
         if not pending_action:
             return "未找到待处理操作。"
         
@@ -373,83 +397,97 @@ async def process_user_decision(session_data: Dict[str, Any], decision: str) -> 
         # 获取待处理操作中的工具调用
         tool_calls = pending_action.get("tool_calls", [])
         
-        if decision.lower() == "approve":
+        normalized_decision = decision.lower()
+        execution_error = None
+
+        if normalized_decision == "approve":
             # 对于批准操作，直接执行工具
             # 这里采用简化实现，实际项目中可以执行真实工具并返回结果
             for tool_call in tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
+                result = None
                 
                 # 导入并执行对应工具
                 try:
                     if tool_name == "update_hotel":
                         from customer_support_chat.app.services.tools.hotels import update_hotel
                         # 异步函数使用 ainvoke
-                        result = await update_hotel.ainvoke(tool_args)
+                        result = await update_hotel.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"酒店修改成功：{result}"
                     elif tool_name == "book_hotel":
                         from customer_support_chat.app.services.tools.hotels import book_hotel
                         # 异步函数使用 ainvoke
-                        result = await book_hotel.ainvoke(tool_args)
+                        result = await book_hotel.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"酒店预订成功：{result}"
                     elif tool_name == "cancel_hotel":
                         from customer_support_chat.app.services.tools.hotels import cancel_hotel
                         # 异步函数使用 ainvoke
-                        result = await cancel_hotel.ainvoke(tool_args)
+                        result = await cancel_hotel.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"酒店取消成功：{result}"
                     elif tool_name == "update_car_rental":
                         from customer_support_chat.app.services.tools.cars import update_car_rental
                         # 异步函数使用 ainvoke
-                        result = await update_car_rental.ainvoke(tool_args)
+                        result = await update_car_rental.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"租车信息修改成功：{result}"
                     elif tool_name == "book_car_rental":
                         from customer_support_chat.app.services.tools.cars import book_car_rental
                         # 异步函数使用 ainvoke
-                        result = await book_car_rental.ainvoke(tool_args)
+                        result = await book_car_rental.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"租车预订成功：{result}"
                     elif tool_name == "cancel_car_rental":
                         from customer_support_chat.app.services.tools.cars import cancel_car_rental
                         # 异步函数使用 ainvoke
-                        result = await cancel_car_rental.ainvoke(tool_args)
+                        result = await cancel_car_rental.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"租车取消成功：{result}"
                     elif tool_name == "book_excursion":
                         from customer_support_chat.app.services.tools.excursions import book_excursion
                         # 异步函数使用 ainvoke
-                        result = await book_excursion.ainvoke(tool_args)
+                        result = await book_excursion.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"行程预订成功：{result}"
                     elif tool_name == "update_excursion":
                         from customer_support_chat.app.services.tools.excursions import update_excursion
                         # 异步函数使用 ainvoke
-                        result = await update_excursion.ainvoke(tool_args)
+                        result = await update_excursion.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"行程修改成功：{result}"
                     elif tool_name == "cancel_excursion":
                         from customer_support_chat.app.services.tools.excursions import cancel_excursion
                         # 异步函数使用 ainvoke
-                        result = await cancel_excursion.ainvoke(tool_args)
+                        result = await cancel_excursion.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"行程取消成功：{result}"
+                    elif tool_name == "book_flight":
+                        from customer_support_chat.app.services.tools.flights import book_flight
+                        result = await book_flight.ainvoke(tool_args, config=langgraph_config)
+                        result_message = f"航班预订成功：{result}"
                     elif tool_name == "update_ticket_to_new_flight":
                         from customer_support_chat.app.services.tools.flights import update_ticket_to_new_flight
                         # 异步函数使用 ainvoke
-                        result = await update_ticket_to_new_flight.ainvoke({**tool_args, "config": langgraph_config})
+                        result = await update_ticket_to_new_flight.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"航班改签成功：{result}"
                     elif tool_name == "cancel_ticket":
                         from customer_support_chat.app.services.tools.flights import cancel_ticket
                         # 异步函数使用 ainvoke
-                        result = await cancel_ticket.ainvoke({**tool_args, "config": langgraph_config})
+                        result = await cancel_ticket.ainvoke(tool_args, config=langgraph_config)
                         result_message = f"航班取消成功：{result}"
+                    elif tool_name == "retry_order_booking":
+                        from customer_support_chat.app.services.tools.orders import retry_order_booking
+                        result = await retry_order_booking.ainvoke(tool_args, config=langgraph_config)
+                        result_message = f"订单重试成功：{result}"
                     else:
-                        result_message = f"工具 {tool_name} 已成功执行（审批处理器中尚未实现该工具的专用处理）"
+                        result_message = f"审批处理器不支持工具 {tool_name}，操作未执行。"
+                        execution_error = result_message
                     
                     # 将工具执行结果写入操作日志
                     add_operation_log(session_data["session_id"], {
                         "type": "tool_result",
                         "title": f"{tool_name} 结果",
-                        "content": result if 'result' in locals() else result_message
+                        "content": result if result is not None else result_message
                     })
                     
                 except Exception as e:
                     error_msg = f"执行 {tool_name} 时出错：{str(e)}"
                     result_message = error_msg
+                    execution_error = error_msg
                     add_operation_log(session_data["session_id"], {
                         "type": "error",
                         "title": f"{tool_name} 执行错误",
@@ -465,9 +503,11 @@ async def process_user_decision(session_data: Dict[str, Any], decision: str) -> 
                 "content": "用户拒绝了敏感操作"
             })
         
-        # 清除待处理操作和用户决策
-        clear_pending_action(session_data["session_id"])
-        clear_user_decision(session_data["session_id"])
+        resolve_pending_action(
+            session_data["session_id"],
+            normalized_decision,
+            error_message=execution_error,
+        )
         
         # 返回结果消息
         if result_message:
@@ -483,11 +523,14 @@ async def process_user_decision(session_data: Dict[str, Any], decision: str) -> 
             "title": "决策处理错误",
             "content": str(e)
         })
-        # 即使发生错误，也尝试清除待处理操作和用户决策
+        # 即使发生错误，也将数据库审批状态标记为失败。
         try:
-            clear_pending_action(session_data["session_id"])
-            clear_user_decision(session_data["session_id"])
-        except:
+            resolve_pending_action(
+                session_data["session_id"],
+                decision.lower(),
+                error_message=str(e),
+            )
+        except Exception:
             pass
         return "处理您的决策时发生了异常错误，请稍后重试。"
 
