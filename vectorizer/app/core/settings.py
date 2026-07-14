@@ -1,7 +1,10 @@
 from os import environ
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+project_root = Path(__file__).resolve().parents[3]
+load_dotenv(project_root / ".env")
+load_dotenv(project_root / ".env.local", override=True)
 
 
 class Config:
@@ -17,7 +20,11 @@ class Config:
     USE_LOCAL_EMBEDDINGS: bool = environ.get("USE_LOCAL_EMBEDDINGS", "false").lower() == "true"
     LOCAL_EMBEDDING_MODEL: str = environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-    SQLITE_DB_PATH: str = environ.get("SQLITE_DB_PATH", "./customer_support_chat/data/travel2.sqlite")
+    DATABASE_HOST: str = environ.get("DATABASE_HOST", "localhost")
+    DATABASE_PORT: int = int(environ.get("DATABASE_PORT", "5432"))
+    DATABASE_NAME: str = environ.get("DATABASE_NAME", "multi_agent")
+    DATABASE_USER: str = environ.get("DATABASE_USER", "postgres")
+    DATABASE_PASSWORD: str = environ.get("DATABASE_PASSWORD", "")
     QDRANT_URL: str = environ.get("QDRANT_URL", "http://localhost:6333")
     QDRANT_KEY: str = environ.get("QDRANT_KEY", "")
     RECREATE_COLLECTIONS: bool = environ.get("RECREATE_COLLECTIONS", "False")

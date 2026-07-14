@@ -1,3 +1,10 @@
+import os
+import sys
+
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from vectorizer.app.core.logger import logger
 from vectorizer.app.vectordb.vectordb import VectorDB
 from vectorizer.app.core.settings import get_settings
@@ -81,4 +88,4 @@ def create_collections():
 if __name__ == "__main__":
     create_collections()
     logger.info(f"\n🚀 提示: 若要填充其他集合（flights、hotels、car_rentals、excursions），"
-               f"请确保位于 {settings.SQLITE_DB_PATH} 的 SQLite 数据库中包含所需数据表及数据。")
+               "请确保 PostgreSQL 数据库中包含所需数据表及数据。")

@@ -1,8 +1,8 @@
 import os
-import sqlite3
 import uuid
 import re
 import requests
+from psycopg import sql
 from tqdm import tqdm
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
@@ -17,6 +17,7 @@ import aiohttp
 from tqdm.asyncio import tqdm_asyncio
 from more_itertools import chunked
 import time
+from customer_support_chat.app.core.database import get_connection
 
 settings = get_settings()
 
@@ -372,18 +373,12 @@ class VectorDB:
         logger.info(f"📊 正在处理普通集合: {self.collection_name}，来源表: {self.table_name}")
         
         try:
-            # 检查数据库文件是否存在
-            if not os.path.exists(settings.SQLITE_DB_PATH):
-                logger.warning(f"⚠️ 未找到 SQLite 数据库文件: {settings.SQLITE_DB_PATH}")
-                logger.info(f"💡 跳过集合 {self.collection_name}。请创建数据库文件以启用该集合。")
-                return
-                
-            db_connection = sqlite3.connect(settings.SQLITE_DB_PATH)
+            db_connection = get_connection()
             cursor = db_connection.cursor()
             
             # 检查数据表是否存在
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (self.table_name,))
-            table_exists = cursor.fetchone() is not None
+            cursor.execute("SELECT to_regclass(%s)", (f"public.{self.table_name}",))
+            table_exists = cursor.fetchone()[0] is not None
             
             if not table_exists:
                 logger.warning(f"⚠️ 数据库中不存在表 '{self.table_name}'。")
@@ -392,7 +387,9 @@ class VectorDB:
                 return
             
             # 获取表数据
-            cursor.execute(f"SELECT * FROM {self.table_name}")
+            cursor.execute(
+                sql.SQL("SELECT * FROM {}").format(sql.Identifier(self.table_name))
+            )
             rows = cursor.fetchall()
             column_names = [column[0] for column in cursor.description]
             db_connection.close()
@@ -843,6 +840,9 @@ class VectorDB:
             return []
 
     def search(self, query, limit=2, with_payload=True):
+        if not self.client.collection_exists(self.collection_name):
+            raise ValueError(f"向量集合 {self.collection_name} 不存在，请先运行 vectorizer/app/main.py 初始化索引。")
+
         query_vector = generate_embedding(query)
         if hasattr(self.client, "search"):
             return self.client.search(
