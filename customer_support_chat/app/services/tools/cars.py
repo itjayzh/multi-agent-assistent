@@ -1,111 +1,94 @@
-from vectorizer.app.vectordb.vectordb import VectorDB
-from customer_support_chat.app.core.settings import get_settings
-from langchain_core.tools import tool
-from customer_support_chat.app.core.humanloop_manager import humanloop_adapter # 导入审批适配器
-import sqlite3
-from typing import List, Dict, Optional, Union
-from datetime import datetime, date
+from datetime import date, datetime
+from typing import Dict, List, Union
 
-settings = get_settings()
-db = settings.SQLITE_DB_PATH
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+
+from customer_support_chat.app.core.database import get_connection
+from customer_support_chat.app.services.order_service import (
+    cancel_order,
+    create_car_order,
+    update_car_order,
+)
+from vectorizer.app.vectordb.vectordb import VectorDB
+
 
 cars_vectordb = VectorDB(table_name="car_rentals", collection_name="car_rentals_collection")
 
-@tool
-def search_car_rentals(
-    query: str,
-    limit: int = 2,
-) -> List[Dict]:
-    """根据自然语言查询搜索租车信息。"""
-    search_results = cars_vectordb.search(query, limit=limit)
 
+def get_passenger_id(config: RunnableConfig) -> str:
+    passenger_id = config.get("configurable", {}).get("passenger_id")
+    if not passenger_id:
+        raise ValueError("未配置乘机人 ID。")
+    return passenger_id
+
+
+@tool
+def search_car_rentals(query: str, limit: int = 2) -> List[Dict]:
+    """用向量库召回车辆，并从 PostgreSQL 返回当前价格和状态。"""
+    search_results = cars_vectordb.search(query, limit=limit)
     rentals = []
     for result in search_results:
         payload = result.payload
+        with get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT c.id, c.name, c.location, c.price_tier,
+                           c.start_date, c.end_date, c.booked,
+                           p.base_amount_minor, p.currency
+                    FROM car_rentals c
+                    JOIN products p
+                      ON p.product_type = 'car'
+                     AND p.external_product_id = %s
+                     AND p.active = TRUE
+                    WHERE c.id = %s
+                    """,
+                    (f"legacy-car-{payload['id']}", payload["id"]),
+                )
+                rental = cursor.fetchone()
+        if rental is None:
+            continue
         rentals.append({
-            "id": payload["id"],
-            "name": payload["name"],
-            "location": payload["location"],
-            "price_tier": payload["price_tier"],
-            "start_date": payload["start_date"],
-            "end_date": payload["end_date"],
-            "booked": payload["booked"],
+            "id": rental[0],
+            "name": rental[1],
+            "location": rental[2],
+            "price_tier": rental[3],
+            "start_date": rental[4],
+            "end_date": rental[5],
+            "booked": rental[6],
+            "amount_minor": rental[7],
+            "currency": rental[8],
             "chunk": payload["content"],
             "similarity": result.score,
         })
     return rentals
 
-@tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
-async def book_car_rental(rental_id: int, approval_result=None) -> str:
-    """根据租车 ID 进行预订。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
-
-    cursor.execute("UPDATE car_rentals SET booked = 1 WHERE id = ?", (rental_id,))
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"租车记录 {rental_id} 预订成功。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {rental_id} 的租车记录。"
 
 @tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
+async def book_car_rental(rental_id: int, *, config: RunnableConfig) -> str:
+    """根据车辆产品 ID 创建当前用户的正式订单。"""
+    return create_car_order(rental_id, get_passenger_id(config))
+
+
+@tool
 async def update_car_rental(
-    rental_id: int,
-    start_date: Optional[Union[datetime, date]] = None,
-    end_date: Optional[Union[datetime, date]] = None,
-    approval_result=None
+    order_id: int,
+    start_date: Union[datetime, date],
+    end_date: Union[datetime, date],
+    *,
+    config: RunnableConfig,
 ) -> str:
-    """根据租车 ID 更新租期开始和结束日期。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
+    """根据正式订单 ID 修改当前用户的租车日期。"""
+    return update_car_order(
+        order_id,
+        get_passenger_id(config),
+        start_date,
+        end_date,
+    )
 
-    if start_date:
-        cursor.execute(
-            "UPDATE car_rentals SET start_date = ? WHERE id = ?",
-            (start_date.strftime('%Y-%m-%d'), rental_id),
-        )
-    if end_date:
-        cursor.execute(
-            "UPDATE car_rentals SET end_date = ? WHERE id = ?",
-            (end_date.strftime('%Y-%m-%d'), rental_id),
-        )
-
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"租车记录 {rental_id} 更新成功。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {rental_id} 的租车记录。"
 
 @tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
-async def cancel_car_rental(rental_id: int, approval_result=None) -> str:
-    """根据租车 ID 取消租车。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
-
-    cursor.execute("UPDATE car_rentals SET booked = 0 WHERE id = ?", (rental_id,))
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"租车记录 {rental_id} 已成功取消。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {rental_id} 的租车记录。"
+async def cancel_car_rental(order_id: int, *, config: RunnableConfig) -> str:
+    """根据正式订单 ID 取消当前用户的租车订单。"""
+    return cancel_order(order_id, get_passenger_id(config))

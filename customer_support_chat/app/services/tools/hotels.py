@@ -1,113 +1,94 @@
-from vectorizer.app.vectordb.vectordb import VectorDB
-from customer_support_chat.app.core.settings import get_settings
-from langchain_core.tools import tool
-from customer_support_chat.app.core.humanloop_manager import humanloop_adapter # 导入审批适配器
-import sqlite3
-from typing import Optional, Union, List, Dict
-from datetime import datetime, date
+from datetime import date, datetime
+from typing import Dict, List, Union
 
-settings = get_settings()
-db = settings.SQLITE_DB_PATH
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+
+from customer_support_chat.app.core.database import get_connection
+from customer_support_chat.app.services.order_service import (
+    cancel_order,
+    create_hotel_order,
+    update_hotel_order,
+)
+from vectorizer.app.vectordb.vectordb import VectorDB
+
+
 hotels_vectordb = VectorDB(table_name="hotels", collection_name="hotels_collection")
 
-@tool
-def search_hotels(
-    query: str,
-    limit: int = 2,
-) -> List[Dict]:
-    """根据自然语言查询搜索酒店。"""
-    search_results = hotels_vectordb.search(query, limit=limit)
 
+def get_passenger_id(config: RunnableConfig) -> str:
+    passenger_id = config.get("configurable", {}).get("passenger_id")
+    if not passenger_id:
+        raise ValueError("未配置乘机人 ID。")
+    return passenger_id
+
+
+@tool
+def search_hotels(query: str, limit: int = 2) -> List[Dict]:
+    """用向量库召回酒店，并从 PostgreSQL 返回当前价格和状态。"""
+    search_results = hotels_vectordb.search(query, limit=limit)
     hotels = []
     for result in search_results:
         payload = result.payload
+        with get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT h.id, h.name, h.location, h.price_tier,
+                           h.checkin_date, h.checkout_date, h.booked,
+                           p.base_amount_minor, p.currency
+                    FROM hotels h
+                    JOIN products p
+                      ON p.product_type = 'hotel'
+                     AND p.external_product_id = %s
+                     AND p.active = TRUE
+                    WHERE h.id = %s
+                    """,
+                    (f"legacy-hotel-{payload['id']}", payload["id"]),
+                )
+                hotel = cursor.fetchone()
+        if hotel is None:
+            continue
         hotels.append({
-            "id": payload["id"],
-            "name": payload["name"],
-            "location": payload["location"],
-            "price_tier": payload["price_tier"],
-            "checkin_date": payload["checkin_date"],
-            "checkout_date": payload["checkout_date"],
-            "booked": payload["booked"],
+            "id": hotel[0],
+            "name": hotel[1],
+            "location": hotel[2],
+            "price_tier": hotel[3],
+            "checkin_date": hotel[4],
+            "checkout_date": hotel[5],
+            "booked": hotel[6],
+            "amount_minor": hotel[7],
+            "currency": hotel[8],
             "chunk": payload["content"],
             "similarity": result.score,
         })
     return hotels
 
-@tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
-async def book_hotel(hotel_id: int, approval_result=None) -> str:
-    """根据酒店 ID 进行预订。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
-
-    cursor.execute("UPDATE hotels SET booked = 1 WHERE id = ?", (hotel_id,))
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"酒店 {hotel_id} 预订成功。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {hotel_id} 的酒店。"
 
 @tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
+async def book_hotel(hotel_id: int, *, config: RunnableConfig) -> str:
+    """根据酒店产品 ID 创建当前用户的正式订单。"""
+    return create_hotel_order(hotel_id, get_passenger_id(config))
+
+
+@tool
 async def update_hotel(
-    hotel_id: int,
-    checkin_date: Optional[Union[datetime, date]] = None,
-    checkout_date: Optional[Union[datetime, date]] = None,
-    approval_result=None
+    order_id: int,
+    checkin_date: Union[datetime, date],
+    checkout_date: Union[datetime, date],
+    *,
+    config: RunnableConfig,
 ) -> str:
-    """根据酒店 ID 更新入住和退房日期，并标记为已预订。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
+    """根据正式订单 ID 修改当前用户的酒店入住日期。"""
+    return update_hotel_order(
+        order_id,
+        get_passenger_id(config),
+        checkin_date,
+        checkout_date,
+    )
 
-    # 更新时始终将酒店标记为已预订
-    cursor.execute("UPDATE hotels SET booked = 1 WHERE id = ?", (hotel_id,))
-
-    if checkin_date:
-        cursor.execute(
-            "UPDATE hotels SET checkin_date = ? WHERE id = ?",
-            (checkin_date.strftime('%Y-%m-%d'), hotel_id),
-        )
-    if checkout_date:
-        cursor.execute(
-            "UPDATE hotels SET checkout_date = ? WHERE id = ?",
-            (checkout_date.strftime('%Y-%m-%d'), hotel_id),
-        )
-
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"酒店 {hotel_id} 已成功更新并标记为已预订。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {hotel_id} 的酒店。"
 
 @tool
-@humanloop_adapter.require_approval(execute_on_reject=False)
-async def cancel_hotel(hotel_id: int, approval_result=None) -> str:
-    """根据酒店 ID 取消预订。"""
-    # 如果审批被拒绝，将不会执行下面的函数体。
-    # 如果审批通过，approval_result 中会包含审批详情。
-    
-    conn = sqlite3.connect(db)
-    cursor = conn.cursor()
-
-    cursor.execute("UPDATE hotels SET booked = 0 WHERE id = ?", (hotel_id,))
-    conn.commit()
-
-    if cursor.rowcount > 0:
-        conn.close()
-        return f"酒店 {hotel_id} 已成功取消。"
-    else:
-        conn.close()
-        return f"未找到 ID 为 {hotel_id} 的酒店。"
+async def cancel_hotel(order_id: int, *, config: RunnableConfig) -> str:
+    """根据正式订单 ID 取消当前用户的酒店订单。"""
+    return cancel_order(order_id, get_passenger_id(config))

@@ -4,6 +4,7 @@ from .lookup import lookup_policy, search_faq
 from .flights import (
     fetch_user_flight_information,
     search_flights,
+    book_flight,
     update_ticket_to_new_flight,
     cancel_ticket,
 )
@@ -25,16 +26,14 @@ from .excursions import (
     update_excursion,
     cancel_excursion,
 )
-# 用于扩展功能的新工具
-from .woocommerce import search_products, search_orders
-from .forms import submit_form
-from .blog import search_blog_posts
+from .orders import fetch_order_detail, fetch_user_orders, retry_order_booking
 
 __all__ = [
     "lookup_policy",
     "search_faq",
     "fetch_user_flight_information",
     "search_flights",
+    "book_flight",
     "update_ticket_to_new_flight",
     "cancel_ticket",
     "search_car_rentals",
@@ -49,9 +48,7 @@ __all__ = [
     "book_excursion",
     "update_excursion",
     "cancel_excursion",
-    # 新工具
-    "search_products",
-    "search_orders",
-    "submit_form",
-    "search_blog_posts",
+    "fetch_user_orders",
+    "fetch_order_detail",
+    "retry_order_booking",
 ]
